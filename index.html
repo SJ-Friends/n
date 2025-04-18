@@ -3,7 +3,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"/>
-<title>소중한 이웃들 일정 등록</title>
+<title>일상을 여행처럼 일정 등록</title>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
@@ -33,7 +33,7 @@
 <body>
 <div class="header">
 <img alt="로고" src="logo.jpg"/>
-<h1>소중한 이웃들 일정 등록</h1>
+<h1>일상을 여행처럼 일정 등록</h1>
 </div>
 <div class="form-group">
 <label for="title">업체명</label>
@@ -116,7 +116,7 @@
         return;
       }
 
-      const { error } = await supabase.from('sche').insert([{
+      const { error } = await supabase.from('sche2').insert([{
         title, loca, date_s, date_e, cost, tel, office, memo, ...dayValues
       }]);
 

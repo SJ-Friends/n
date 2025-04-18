@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <title>월간 실적 리포트 - 소중한 이웃들</title>
+  <title>월간 실적 리포트 - 일상을 여행처럼</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
@@ -173,7 +173,7 @@
 
     async function loadDoneData(year, month) {
       updateTitle(year, month);
-      const { data, error } = await supabase.from('sche').select('*');
+      const { data, error } = await supabase.from('sche2').select('*');
       if (error) {
         alert('데이터 불러오기 실패');
         return;
