@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>엑셀 자동 로딩 지도 (캐시/다운로드 + 전체화면)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, 'Noto Sans KR', Arial, sans-serif; }
+    header { padding: 14px 16px; background:#fafafa; border-bottom:1px solid #eee; }
+    h2 { margin: 0 0 8px; }
+    .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .controls > * { margin: 4px 0; }
+    .wrap { max-width: 1100px; margin: 14px auto; padding: 0 12px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 24px; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th, td { border:1px solid #e6e6e6; padding:8px; text-align:center; }
+    th { background:#f3f4f6; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:12px; }
+    .ok { background:#e6f7e6; color:#1a7f37; }
+    .fail { background:#ffefef; color:#c1121f; }
+    .hint { font-size:12px; color:#666; }
+    .link { color:#0b70d0; text-decoration:underline; font-size:12px; }
+    .progress { font-size:13px; color:#333; }
+    .btn { padding:8px 12px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer; }
+    .btn.primary { background:#0ea5e9; color:#fff; border-color:#0ea5e9; }
+    .btn:disabled { opacity:0.6; cursor:not-allowed; }
+    code { background:#f3f4f6; padding:2px 6px; border-radius:6px; }
+
+    /* 지도 영역 */
+    #mapWrap { position: relative; }
+    #map { width: 100%; height: 62vh; }
+
+    /* 지도에 떠있는 컨트롤(FAB) */
+    .map-controls {
+      position: absolute; top: 10px; right: 10px; z-index: 10;
+      display:flex; gap:8px;
+    }
+    .fab {
+      border: none; border-radius: 10px; padding: 8px 10px; cursor: pointer;
+      background: rgba(255,255,255,0.9); box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      font-size: 14px;
+    }
+    .fab:hover { background: #fff; }
+    .fab:active { transform: translateY(1px); }
+
+    /* 전체화면/대체 전체모드에서 비가시 영역 숨김 */
+    body.fs-active header,
+    body.fs-active .wrap.grid { display: none; }
+    /* 대체 전체모드(CSS 고정) */
+    body.simfs #mapWrap {
+      position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important;
+      z-index: 9999 !important; background: #000;
+    }
+    body.simfs #map { height: 100vh !important; }
+    body.simfs header, body.simfs .wrap.grid { display: none; }
+  </style>
+  <!-- Kakao Maps SDK -->
+  <script type="text/javascript"
+    src="//dapi.kakao.com/v2/maps/sdk.js?appkey=a49fe18b80104f2300aeaadfc1cd9924&libraries=services"></script>
+  <!-- SheetJS for reading Excel -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h2>엑셀/CSV 자동 로딩 → 지도 핀 표시 (캐시/다운로드 + 전체화면)</h2>
+      <div class="controls">
+        <button class="btn" id="btnReload">다시 불러오기</button>
+        <button class="btn" id="btnClearView">지도/목록 초기화</button>
+        <button class="btn" id="btnFailCsv" disabled>실패목록 CSV</button>
+        <button class="btn" id="btnEnrichedCsv" disabled>강화 CSV 다운로드</button>
+        <button class="btn" id="btnExportCache">캐시 JSON 내보내기</button>
+        <button class="btn" id="btnClearCache">캐시 전체 삭제</button>
+        <label class="hint">지오코딩 간격(ms):
+          <input type="number" id="delayInput" value="250" style="width:80px;" />
+        </label>
+        <label class="hint"><input type="checkbox" id="cacheOnlyCheck" /> 캐시만 사용</label>
+        <label class="hint">캐시 TTL(일):
+          <input type="number" id="ttlDaysInput" value="7" style="width:60px;" />
+        </label>
+        <span class="progress" id="progressText">대기 중…</span>
+      </div>
+      <div class="hint">
+        기본 파일: <code>./name_addresses.xlsx</code> → 실패 시 <code>./name_addresses.csv</code><br/>
+        또는 URL 파라미터: <code>?src=/경로/파일.xlsx</code> 또는 <code>?src=https://.../파일.csv</code>
+      </div>
+    </div>
+  </header>
+
+  <!-- 지도 + 떠있는 컨트롤 -->
+  <div id="mapWrap">
+    <div id="map"></div>
+    <div class="map-controls">
+      <button class="fab" id="btnFs">⛶ 전체화면</button>
+    </div>
+  </div>
+
+  <div class="wrap grid">
+    <section>
+      <h3>✅ 성공 목록</h3>
+      <table>
+        <thead>
+          <tr><th>#</th><th>이름</th><th>주소</th><th>상태</th><th>네이버 지도</th></tr>
+        </thead>
+        <tbody id="successTbody"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h3>❗ 실패 목록</h3>
+      <table>
+        <thead>
+          <tr><th>#</th><th>이름</th><th>주소</th><th>사유</th><th>네이버 검색</th></tr>
+        </thead>
+        <tbody id="failTbody"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    // ===== Kakao map init =====
+    let map, geocoder, markers = [], openInfoWindow = null, bounds;
+    function initMap() {
+      map = new kakao.maps.Map(document.getElementById('map'), {
+        center: new kakao.maps.LatLng(35.1796, 129.0756), // 부산 시청 근처 기본값
+        level: 6
+      });
+      geocoder = new kakao.maps.services.Geocoder();
+      bounds = new kakao.maps.LatLngBounds();
+    }
+    initMap();
+
+    // ===== UI refs =====
+    const progressText   = document.getElementById('progressText');
+    const successTbody   = document.getElementById('successTbody');
+    const failTbody      = document.getElementById('failTbody');
+    const btnClearView   = document.getElementById('btnClearView');
+    const btnFailCsv     = document.getElementById('btnFailCsv');
+    const btnEnrichedCsv = document.getElementById('btnEnrichedCsv');
+    const btnReload      = document.getElementById('btnReload');
+    const btnExportCache = document.getElementById('btnExportCache');
+    const btnClearCache  = document.getElementById('btnClearCache');
+    const delayInput     = document.getElementById('delayInput');
+    const cacheOnlyCheck = document.getElementById('cacheOnlyCheck');
+    const ttlDaysInput   = document.getElementById('ttlDaysInput');
+    const btnFs          = document.getElementById('btnFs');
+    const mapWrap        = document.getElementById('mapWrap');
+
+    // ===== State =====
+    let parsedRows = [];   // { name, address }
+    let failRows   = [];   // { 이름, 주소, 사유 }
+    let enriched   = [];   // [{이름, 주소, x, y, source:'cache|geocode'}]
+    const CACHE_NS = 'geoCache.v1';
+    const CACHE_MAX = 5000;
+
+    // ===== Helpers =====
+    function setProgress(msg) { progressText.textContent = msg; }
+    function sleep(ms){ return new Promise(res => setTimeout(res, ms)); }
+    function now() { return Date.now(); }
+    function daysToMs(d){ return d * 24 * 60 * 60 * 1000; }
+
+    function clearView() {
+      if (markers.length) markers.forEach(m => m.setMap(null));
+      markers = [];
+      successTbody.innerHTML = '';
+      failTbody.innerHTML = '';
+      failRows = [];
+      enriched = [];
+      bounds = new kakao.maps.LatLngBounds();
+      setProgress('뷰 초기화 완료');
+      btnFailCsv.disabled = true;
+      btnEnrichedCsv.disabled = true;
+    }
+    btnClearView.addEventListener('click', clearView);
+
+    // ===== Fullscreen helpers =====
+    let prevCenter = null;
+    function relayoutAndRestore() {
+      // 지도 컨테이너 크기 변경 후 레이아웃 갱신 + 중심 보정
+      const center = prevCenter || map.getCenter();
+      kakao.maps.event.trigger(map, 'resize'); // 일부 환경에서 필요
+      map.relayout();
+      if (center) map.setCenter(center);
+    }
+
+    async function enterFullscreen() {
+      prevCenter = map.getCenter();
+      document.body.classList.add('fs-active'); // 헤더/테이블 숨김
+      // Fullscreen API 우선 시도
+      const el = mapWrap;
+      try {
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+        else if (el.msRequestFullscreen) await el.msRequestFullscreen();
+        else throw new Error('Fullscreen API not supported');
+      } catch (e) {
+        // 대체 모드: CSS로 화면 고정
+        document.body.classList.add('simfs');
+      }
+      // 높이 보정
+      document.getElementById('map').style.height = '100vh';
+      setTimeout(relayoutAndRestore, 50);
+      btnFs.textContent = '× 전체화면 해제';
+    }
+
+    async function exitFullscreen() {
+      document.getElementById('map').style.height = '62vh';
+      // Fullscreen API 해제
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else if (document.webkitFullscreenElement) await document.webkitExitFullscreen?.();
+      } catch(_) {}
+      // 대체 모드 해제
+      document.body.classList.remove('simfs');
+      document.body.classList.remove('fs-active');
+      setTimeout(relayoutAndRestore, 50);
+      btnFs.textContent = '⛶ 전체화면';
+    }
+
+    function isFsActive() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement || document.body.classList.contains('simfs'));
+    }
+
+    btnFs.addEventListener('click', () => {
+      if (isFsActive()) exitFullscreen(); else enterFullscreen();
+    });
+
+    // Esc 키로 해제
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isFsActive()) exitFullscreen();
+    });
+
+    // 시스템 전체화면 변경 감지
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        // 사용자가 Esc로 빠져나온 경우
+        exitFullscreen();
+      }
+    });
+
+    // ===== Cache ops =====
+    function hashKey(str){
+      let h = 0;
+      for (let i=0; i<str.length; i++){ h = (h*31 + str.charCodeAt(i)) | 0; }
+      return String(h);
+    }
+    function cacheKeyFor(addr, srcTag){ return `${CACHE_NS}:${srcTag}:${hashKey(addr.trim())}`; }
+    function getCacheItem(key){
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      try { return JSON.parse(raw); } catch { return null; }
+    }
+    function setCacheItem(key, value){
+      try { localStorage.setItem(key, JSON.stringify(value)); }
+      catch(e){
+        console.warn('localStorage full, clearing namespace…', e);
+        clearCacheNamespace();
+        localStorage.setItem(key, JSON.stringify(value));
+      }
+    }
+    function clearCacheNamespace(){
+      const keys = Object.keys(localStorage);
+      for (const k of keys){ if (k.startsWith(CACHE_NS+':')) localStorage.removeItem(k); }
+    }
+    btnClearCache.addEventListener('click', () => {
+      clearCacheNamespace();
+      alert('캐시를 모두 삭제했습니다.');
+    });
+    function exportCacheJSON(){
+      const keys = Object.keys(localStorage).filter(k => k.startsWith(CACHE_NS+':'));
+      const dump = {};
+      for (const k of keys) dump[k] = getCacheItem(k);
+      const blob = new Blob([JSON.stringify(dump, null, 2)], { type:'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'geocode_cache.json'; a.click();
+      URL.revokeObjectURL(url);
+    }
+    btnExportCache.addEventListener('click', exportCacheJSON);
+    function enforceCacheLimit(){
+      const keys = Object.keys(localStorage).filter(k => k.startsWith(CACHE_NS+':'));
+      if (keys.length <= CACHE_MAX) return;
+      const list = keys.map(k => ({ k, v: getCacheItem(k) })).filter(x => x.v);
+      list.sort((a,b) => (a.v.createdAt||0) - (b.v.createdAt||0));
+      const toRemove = list.slice(0, Math.max(0, list.length - CACHE_MAX));
+      toRemove.forEach(x => localStorage.removeItem(x.k));
+    }
+
+    // ===== Table & Marker =====
+    function addSuccessRow(idx, name, address, coords, source) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx+1}</td>
+        <td>${name}</td>
+        <td>${address}</td>
+        <td><span class="badge ok">${source==='cache' ? '캐시' : '지오코딩'}</span></td>
+        <td><a class="link" target="_blank"
+               href="https://map.naver.com/v5/search/${encodeURIComponent(address)}">네이버지도</a></td>`;
+      successTbody.appendChild(tr);
+
+      const marker = new kakao.maps.Marker({ map, position: coords, title: `${name}` });
+      markers.push(marker);
+
+      const infoWindow = new kakao.maps.InfoWindow({
+        content: `
+          <div style="padding:6px 8px;font-size:13px;line-height:1.4;">
+            <b>${name}</b><br>${address}<br><small>${source==='cache'?'(cache)':''}</small>
+          </div>`
+      });
+      kakao.maps.event.addListener(marker, 'click', () => {
+        if (openInfoWindow) openInfoWindow.close();
+        infoWindow.open(map, marker);
+        openInfoWindow = infoWindow;
+      });
+
+      bounds.extend(coords);
+      map.setBounds(bounds);
+    }
+
+    function addFailRow(idx, name, address, reason) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx+1}</td>
+        <td>${name}</td>
+        <td>${address}</td>
+        <td><span class="badge fail">${reason || '실패'}</span></td>
+        <td><a class="link" target="_blank"
+               href="https://map.naver.com/v5/search/${encodeURIComponent(address)}">네이버 검색</a></td>`;
+      failTbody.appendChild(tr);
+      failRows.push({ 이름: name, 주소: address, 사유: reason || '지오코딩 실패' });
+      btnFailCsv.disabled = failRows.length === 0;
+    }
+
+    function downloadCSV(filename, rows, headers){
+      const head = headers.join(',') + '\n';
+      const lines = rows.map(r => headers.map(h => `"${String(r[h] ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+      const blob = new Blob([head + lines], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    btnFailCsv.addEventListener('click', () => {
+      if (!failRows.length) return;
+      downloadCSV('geocode_failed.csv', failRows, ['이름','주소','사유']);
+    });
+
+    btnEnrichedCsv.addEventListener('click', () => {
+      if (!enriched.length) return;
+      downloadCSV('geocode_enriched.csv', enriched, ['이름','주소','x','y','source']);
+    });
+
+    // ===== Header normalization =====
+    function normalizeHeader(h){
+      if (!h) return '';
+      return String(h).trim().replace(/\s+/g,'').toLowerCase();
+    }
+    function pickColumns(headers){
+      let nameIdx = -1, addrIdx = -1;
+      headers.forEach((h, i) => {
+        const n = normalizeHeader(h);
+        if (['이름','name'].includes(n)) nameIdx = i;
+        if (['실제거주지주소','주소','address','actualaddress','residentialaddress'].includes(n)) addrIdx = i;
+      });
+      return { nameIdx, addrIdx };
+    }
+
+    // ===== Load file by fetch =====
+    async function fetchArrayBuffer(url){
+      const res = await fetch(url, { mode: 'cors' }); // same-origin이면 CORS 영향 없음
+      if (!res.ok) throw new Error(`HTTP ${res.status} - ${url}`);
+      return await res.arrayBuffer();
+    }
+    async function loadFromXlsx(url){
+      const ab = await fetchArrayBuffer(url);
+      const wb = XLSX.read(ab, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows:false });
+      if (!rows.length) throw new Error('빈 시트입니다.');
+      const headers = rows[0];
+      const { nameIdx, addrIdx } = pickColumns(headers);
+      if (nameIdx < 0 || addrIdx < 0) throw new Error('엑셀 헤더(이름/주소)를 찾지 못했습니다.');
+      return rows.slice(1).map(r => ({ name: r[nameIdx], address: r[addrIdx] }))
+                 .filter(r => r.name && r.address);
+    }
+    async function loadFromCsv(url){
+      const ab = await fetchArrayBuffer(url);
+      const text = new TextDecoder('utf-8').decode(new Uint8Array(ab));
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      const headers = lines[0].split(',').map(h => h.replace(/(^"|"$)/g,''));
+      const { nameIdx, addrIdx } = pickColumns(headers);
+      if (nameIdx < 0 || addrIdx < 0) throw new Error('CSV 헤더(이름/주소)를 찾지 못했습니다.');
+      return lines.slice(1).map(line => {
+        const cols = line.split(',');
+        return { name: cols[nameIdx]?.replace(/(^"|"$)/g,''), address: cols[addrIdx]?.replace(/(^"|"$)/g,'') };
+      }).filter(r => r.name && r.address);
+    }
+
+    // ===== Auto load & process =====
+    async function autoLoad() {
+      try {
+        setProgress('자동 로딩: 소스 결정 중…');
+        const params = new URLSearchParams(location.search);
+        const src = params.get('src');
+
+        const srcTag = src ? src : 'default';
+        let rows;
+        if (src) {
+          setProgress(`자동 로딩: ${src}`);
+          rows = src.toLowerCase().endsWith('.csv') ? await loadFromCsv(src) : await loadFromXlsx(src);
+        } else {
+          try {
+            setProgress('자동 로딩: name_addresses.xlsx 시도…');
+            rows = await loadFromXlsx('./name_addresses.xlsx');
+          } catch (e1) {
+            console.warn('xlsx 실패, csv 시도:', e1);
+            setProgress('자동 로딩: name_addresses.csv 시도…');
+            rows = await loadFromCsv('./name_addresses.csv');
+          }
+        }
+
+        parsedRows = rows;
+        setProgress(`총 ${rows.length}건 로드됨. 표시 시작…`);
+        await renderWithCache(rows, srcTag);
+      } catch (err) {
+        console.error(err);
+        setProgress('자동 로딩 실패: ' + err.message);
+      }
+    }
+
+    // ===== Use cache + geocode with TTL =====
+    async function renderWithCache(rows, srcTag){
+      clearView();
+      const delay = Math.max(0, Number(delayInput.value) || 250);
+      const ttlDays = Math.max(0, Number(ttlDaysInput.value) || 7);
+      const ttlMs = ttlDays * 24 * 60 * 60 * 1000;
+      const useCacheOnly = cacheOnlyCheck.checked;
+
+      let idx = 0, successCount = 0, failCount = 0;
+
+      for (const r of rows){
+        const name = String(r.name).trim();
+        const address = String(r.address).trim();
+        const key = cacheKeyFor(address, srcTag);
+
+        setProgress(`표시 ${idx+1}/${rows.length}… (성공 ${successCount} / 실패 ${failCount})`);
+
+        // 1) 캐시
+        const cached = getCacheItem(key);
+        if (cached && (Date.now() - (cached.updatedAt || cached.createdAt || 0) <= ttlMs)) {
+          const coords = new kakao.maps.LatLng(cached.y, cached.x);
+          addSuccessRow(idx, name, address, coords, 'cache');
+          enriched.push({ '이름': name, '주소': address, x: cached.x, y: cached.y, source: 'cache' });
+          successCount++; idx++;
+          continue;
+        }
+
+        // 2) 캐시만 모드
+        if (useCacheOnly) {
+          addFailRow(idx, name, address, 'CACHE_ONLY');
+          failCount++; idx++;
+          continue;
+        }
+
+        // 3) 지오코딩
+        await new Promise(res => {
+          geocoder.addressSearch(address, (result, status) => {
+            if (status === kakao.maps.services.Status.OK && result?.length){
+              const { x, y } = result[0];
+              const coords = new kakao.maps.LatLng(y, x);
+              addSuccessRow(idx, name, address, coords, 'geocode');
+              enriched.push({ '이름': name, '주소': address, x, y, source: 'geocode' });
+
+              // 캐시 저장
+              setCacheItem(key, { x, y, address, srcTag, createdAt: cached?.createdAt || Date.now(), updatedAt: Date.now() });
+              enforceCacheLimit();
+
+              successCount++;
+            } else {
+              addFailRow(idx, name, address, status || 'NOT_FOUND');
+              failCount++;
+            }
+            res();
+          });
+        });
+
+        idx++;
+        if (delay) await sleep(delay);
+      }
+
+      setProgress(`완료! 총 ${rows.length}건 (성공 ${successCount} / 실패 ${failCount})`);
+      btnEnrichedCsv.disabled = enriched.length === 0;
+    }
+
+    // ===== Buttons =====
+    btnReload.addEventListener('click', autoLoad);
+
+    // ===== Auto run on load =====
+    window.addEventListener('DOMContentLoaded', autoLoad);
+  </script>
+</body>
+</html>
